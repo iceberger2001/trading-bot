@@ -30,3 +30,6 @@ jobs:
       - name: Run bot
         run: python alpaca_bot.py
 
+        # force cron update
+
+
