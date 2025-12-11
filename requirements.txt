@@ -1,3 +1,6 @@
 pandas
-alpaca-trade-api
 numpy
+yfinance
+requests
+alpaca-trade-api
+python-dotenv
