@@ -1,176 +1,210 @@
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import smtplib
-from email.mime.text import MIMEText
-
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import OrderRequest
-from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
 
-from config import *
+import os
+import traceback
 
-# -------------------------------------
-# Universe (Top 25 from your backtest)
-# -------------------------------------
-UNIVERSE = [
-    "NVDA","AXON","NFLX","ENPH","ANET",
-    "AVGO","TTWO","PWR","FSLR","MU",
-    "ALB","LLY","CMA","DRI","HWM",
-    "CPRT","FITB","NTAP","TSLA","TYL",
+# ──────────────────────────────────────────────
+# CONFIG
+# ──────────────────────────────────────────────
+
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+EMAIL_ENABLED = False  # set True if you later configure email
+
+STOCKS = [
+    "NVDA","AXON","NFLX","ENPH","ANET","AVGO","TTWO","PWR","FSLR","MU",
+    "ALB","LLY","CMA","DRI","HWM","CPRT","FITB","NTAP","TSLA","TYL",
     "LRCX","DECK","DVN","RCL","IDXX"
 ]
 
+# ──────────────────────────────────────────────
+# EMAIL (disabled unless EMAIL_ENABLED=True)
+# ──────────────────────────────────────────────
 
-# -------------------------------------
-# EMAIL SENDER
-# -------------------------------------
-def send_email(subject: str, message: str):
+def send_email(subject, body):
     if not EMAIL_ENABLED:
-        print("Email disabled — skipping send.")
-        return
+        return  # Skip email if disabled
+    print("\n[EMAIL WOULD BE SENT HERE]\n")
 
-    msg = MIMEText(message)
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_FROM
-    msg["To"] = EMAIL_TO
+# ──────────────────────────────────────────────
+# TECHNICAL INDICATORS
+# ──────────────────────────────────────────────
 
-    try:
-        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+def compute_indicators(df):
+    df["MA20"] = df["Close"].rolling(window=20).mean()
+    df["MA50"] = df["Close"].rolling(window=50).mean()
 
-        print("Email sent successfully.")
-    except Exception as e:
-        print("Email failed:", e)
+    # RSI Calculation
+    delta = df["Close"].diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    roll_up = up.rolling(14).mean()
+    roll_down = down.rolling(14).mean()
+    rs = roll_up / roll_down
+    df["RSI"] = 100 - (100 / (1 + rs))
 
-
-# -------------------------------------
-# DATA LOADING
-# -------------------------------------
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-
-def load_data(ticker):
-    df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True)
-
-    if df is None or df.empty:
-        return None
-    if len(df) < 50:
-        return None
-
-    df["MA20"] = df["Close"].rolling(20).mean()
-    df["MA50"] = df["Close"].rolling(50).mean()
-    df["RSI"] = compute_rsi(df["Close"])
-
+    df.dropna(inplace=True)
     return df
 
 
-# -------------------------------------
-# SIGNAL GENERATION (fixed version)
-# -------------------------------------
-def generate_signal(df):
-    if df is None or len(df) < 60:
-        return None
+# ──────────────────────────────────────────────
+# GENERATE TRADING SIGNAL
+# ──────────────────────────────────────────────
 
-    # Extract scalars — FIXES ambiguous truth-value errors
-    ma20 = float(df["MA20"].iloc[-1])
-    ma50 = float(df["MA50"].iloc[-1])
-    rsi_val = float(df["RSI"].iloc[-1])
-    close = float(df["Close"].iloc[-1])
+def generate_signal(df):
+    """
+    This version pulls the last row cleanly and avoids Series ambiguity.
+    """
+    today = df.iloc[-1]
+
+    ma20 = float(today["MA20"])
+    ma50 = float(today["MA50"])
+    rsi = float(today["RSI"])
+    close = float(today["Close"])
+
+    # Prior 20-day high for breakout detection
     prev20 = float(df["Close"].rolling(20).max().iloc[-2])
 
-    # Skip if any indicator is missing
-    if any(np.isnan([ma20, ma50, rsi_val, close, prev20])):
-        return None
-
-    uptrend = ma20 > ma50
-    rsi_pullback = rsi_val < 55
+    # Conditions
+    uptrend = close > ma20 > ma50
+    rsi_buy = rsi < 35
     breakout = close > prev20
 
-    if uptrend and (rsi_pullback or breakout):
+    # SELL signals
+    downtrend = close < ma50
+    rsi_sell = rsi > 70
+
+    if uptrend and (rsi_buy or breakout):
         return "BUY"
-
-    if close < ma50:
+    if downtrend or rsi_sell:
         return "SELL"
-
     return None
 
 
-# -------------------------------------
-# TRADING BOT
-# -------------------------------------
+# ──────────────────────────────────────────────
+# MAIN BOT EXECUTION
+# ──────────────────────────────────────────────
+
 def run_bot():
-    print("Bot starting...")
+    logs = []
+    logs.append("Bot starting...")
 
-    # Alpaca client
-    client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+    try:
+        client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+    except Exception as e:
+        logs.append(f"Failed to connect to Alpaca: {e}")
+        print("\n".join(logs))
+        return
 
-    acct = client.get_account()
-    portfolio_value = float(acct.portfolio_value)
-    
-    allocation = portfolio_value * 0.10  # Use 10% per stock
+    # Get account info
+    try:
+        account = client.get_account()
+        portfolio_value = float(account.portfolio_value)
+    except Exception as e:
+        logs.append(f"Could not fetch Alpaca account: {e}")
+        print("\n".join(logs))
+        return
 
-    logs = ["----- BOT LOGS -----", "Bot run starting...\n"]
+    if portfolio_value <= 0:
+        logs.append("Portfolio value is $0 → cannot trade. Reset Alpaca paper account.")
+        print("\n".join(logs))
+        return
 
-    # Current positions
-    positions = {p.symbol: float(p.qty) for p in client.get_all_positions()}
+    allocation = portfolio_value * 0.10  # 10% notional per BUY trade
 
-    for ticker in UNIVERSE:
-        df = load_data(ticker)
-        signal = generate_signal(df)
+    for ticker in STOCKS:
+        try:
+            df = yf.download(ticker, period="6mo", interval="1d", progress=False)
+            if df.empty:
+                logs.append(f"{ticker}: No data")
+                continue
 
-        logs.append(f"{ticker}: {signal}")
+            df = compute_indicators(df)
+            if df.empty:
+                logs.append(f"{ticker}: Not enough data after indicator calc")
+                continue
 
-        # No action
-        if signal is None:
-            continue
+            signal = generate_signal(df)
+            price = float(df["Close"].iloc[-1])
 
-        price = float(df["Close"].iloc[-1])
+            logs.append(f"{ticker}: {signal}")
 
-        # BUY
-        if signal == "BUY":
-            qty = allocation / price  # fractional shares allowed
+            # ──────────────────────
+            # HANDLE BUY SIGNAL
+            # ──────────────────────
+            if signal == "BUY":
 
-            order = OrderRequest(
-                symbol=ticker,
-                notional=allocation,  # fractional notional order!
-                side=OrderSide.BUY,
-                type=OrderType.MARKET,
-                time_in_force=TimeInForce.DAY
-            )
-            client.submit_order(order)
-            logs.append(f"BUY → {ticker} (${allocation:.2f} notional)")
+                if price <= 0:
+                    logs.append(f"SKIP BUY {ticker} — invalid price {price}")
+                    continue
 
-        # SELL
-        elif signal == "SELL" and ticker in positions:
-            qty = positions[ticker]
+                notional = allocation
 
-            order = OrderRequest(
-                symbol=ticker,
-                qty=qty,
-                side=OrderSide.SELL,
-                type=OrderType.MARKET,
-                time_in_force=TimeInForce.DAY
-            )
-            client.submit_order(order)
-            logs.append(f"SELL → {ticker} ({qty} shares)")
+                if notional < 1:
+                    logs.append(f"SKIP BUY {ticker} — notional too small (${notional:.2f})")
+                    continue
 
-    # Print logs
-    log_text = "\n".join(logs)
-    print(log_text)
+                logs.append(
+                    f"BUY → {ticker} | price ${price:.2f} | notional ${notional:.2f}"
+                )
 
-    # Send email report
-    send_email("Daily Trading Bot Report", log_text)
+                order = OrderRequest(
+                    symbol=ticker,
+                    notional=notional,       # fractional shares supported
+                    side=OrderSide.BUY,
+                    type=OrderType.MARKET,
+                    time_in_force=TimeInForce.DAY
+                )
+
+                try:
+                    client.submit_order(order)
+                    logs.append(f"ORDER PLACED: BUY {ticker}")
+                except Exception as e:
+                    logs.append(f"ORDER FAILED BUY {ticker}: {e}")
+
+            # ──────────────────────
+            # HANDLE SELL SIGNAL
+            # ──────────────────────
+            if signal == "SELL":
+
+                try:
+                    pos = client.get_open_position(ticker)
+                    qty = float(pos.qty)
+
+                    if qty <= 0:
+                        logs.append(f"SKIP SELL {ticker} — no shares")
+                        continue
+
+                    order = OrderRequest(
+                        symbol=ticker,
+                        qty=qty,
+                        side=OrderSide.SELL,
+                        type=OrderType.MARKET,
+                        time_in_force=TimeInForce.DAY
+                    )
+
+                    client.submit_order(order)
+                    logs.append(f"ORDER PLACED: SELL {ticker} ({qty} shares)")
+
+                except Exception:
+                    logs.append(f"SKIP SELL {ticker} — no open position")
+
+        except Exception as e:
+            logs.append(f"ERROR processing {ticker}: {e}")
+            logs.append(traceback.format_exc())
+
+    # Print and optionally email logs
+    log_output = "\n".join(logs)
+    print("\n----- BOT LOGS -----\n" + log_output)
+
+    send_email("Daily Trading Bot Report", log_output)
 
 
-# -------------------------------------
-# ENTRY POINT
-# -------------------------------------
+# ENTRYPOINT
 if __name__ == "__main__":
     run_bot()
