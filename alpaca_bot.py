@@ -3,10 +3,10 @@ import numpy as np
 import yfinance as yf
 import smtplib
 from email.mime.text import MIMEText
+
 from alpaca.trading.client import TradingClient
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
 
 from config import *
 
@@ -22,7 +22,7 @@ UNIVERSE = [
 ]
 
 # ----------------------------
-# Email function
+# Email Alerts
 # ----------------------------
 def send_email(subject, message):
     if not EMAIL_ENABLED:
@@ -39,7 +39,18 @@ def send_email(subject, message):
 
 
 # ----------------------------
-# Indicator Calculation
+# RSI Calculation
+# ----------------------------
+def compute_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0).rolling(period).mean()
+    loss = -delta.where(delta < 0, 0).rolling(period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+
+# ----------------------------
+# Load historical data
 # ----------------------------
 def load_data(ticker):
     df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True)
@@ -51,16 +62,8 @@ def load_data(ticker):
     return df
 
 
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0).rolling(period).mean()
-    loss = -delta.where(delta < 0, 0).rolling(period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-
 # ----------------------------
-# Strategy: breakout + RSI pullback
+# Strategy logic
 # ----------------------------
 def generate_signal(df):
     if df is None:
@@ -74,66 +77,72 @@ def generate_signal(df):
 
     if uptrend and (rsi_buy or breakout):
         return "BUY"
+
     if today["Close"] < today["MA50"]:
         return "SELL"
+
     return None
 
 
 # ----------------------------
-# Main Bot
+# Main Bot Logic
 # ----------------------------
 def run_bot():
-    api = REST(ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 
-    account = api.get_account()
-    cash = float(account.cash)
+    # Connect to Alpaca
+    client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+
+    account = client.get_account()
     portfolio_value = float(account.portfolio_value)
 
-    allocation = portfolio_value * 0.10  # 10% per position
+    allocation = portfolio_value * 0.10
 
     logs = ["Bot Run Starting...\n"]
 
-    positions = {p.symbol: float(p.qty) for p in api.list_positions()}
+    # Get open positions
+    positions = {p.symbol: float(p.qty) for p in client.get_all_positions()}
 
     for ticker in UNIVERSE:
+
         df = load_data(ticker)
         signal = generate_signal(df)
 
         logs.append(f"{ticker}: {signal}")
 
+        # BUY logic
         if signal == "BUY":
             price = df["Close"].iloc[-1]
             shares = int(allocation / price)
 
             if shares > 0:
-                api.submit_order(
+                order = MarketOrderRequest(
                     symbol=ticker,
-                    side="buy",
-                    type="market",
-                    qty=shares
+                    qty=shares,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY
                 )
+                client.submit_order(order)
                 logs.append(f"BUY → {ticker} ({shares} shares)")
 
-        elif signal == "SELL":
-            if ticker in positions:
-                qty = positions[ticker]
-                api.submit_order(
-                    symbol=ticker,
-                    side="sell",
-                    type="market",
-                    qty=qty
-                )
-                logs.append(f"SELL → {ticker} (ALL {qty} shares)")
+        # SELL logic
+        elif signal == "SELL" and ticker in positions:
+            qty = int(float(positions[ticker]))
+            order = MarketOrderRequest(
+                symbol=ticker,
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY
+            )
+            client.submit_order(order)
+            logs.append(f"SELL → {ticker} (ALL {qty} shares)")
 
+    # Log output
     log_text = "\n".join(logs)
     print(log_text)
 
-    send_email(
-        "Trading Bot Daily Report",
-        log_text
-    )
+    # Email daily report
+    send_email("Trading Bot Daily Report", log_text)
 
 
 if __name__ == "__main__":
     run_bot()
-
