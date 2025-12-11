@@ -1,6 +1,7 @@
 pandas
 numpy
 yfinance
-requests
 alpaca-trade-api
+requests
 python-dotenv
+alpha_vantage
