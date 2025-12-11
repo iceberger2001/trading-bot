@@ -3,7 +3,11 @@ import numpy as np
 import yfinance as yf
 import smtplib
 from email.mime.text import MIMEText
-from alpaca_trade_api import REST
+from alpaca.trading.client import TradingClient
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+
 from config import *
 
 # ----------------------------
@@ -132,3 +136,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
+
