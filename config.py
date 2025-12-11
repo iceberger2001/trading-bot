@@ -16,3 +16,16 @@ UNIVERSE = [
 ]
 
 RISK_PER_TRADE = 0.10     # 10% of equity
+
+# -----------------------------
+# Email System
+# -----------------------------
+EMAIL_ENABLED = False      # set to True after configuring email
+
+EMAIL_FROM = ""
+EMAIL_TO = ""
+SMTP_SERVER = ""
+SMTP_PORT = 465
+SMTP_USER = ""
+SMTP_PASS = ""
+
