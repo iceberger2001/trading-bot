@@ -71,17 +71,23 @@ def generate_signal(df):
 
     today = df.iloc[-1]
 
-    uptrend = today["MA20"] > today["MA50"]
-    rsi_buy = today["RSI"] < 55
-    breakout = today["Close"] > df["Close"].rolling(20).max().iloc[-2]
+    # ensure these are scalar booleans
+    uptrend = bool(today["MA20"] > today["MA50"])
+    rsi_buy = bool(today["RSI"] < 55)
+
+    # breakout: close > previous 20-day high
+    prev_20_high = df["Close"].rolling(20).max().iloc[-2]
+    breakout = bool(today["Close"] > prev_20_high)
 
     if uptrend and (rsi_buy or breakout):
         return "BUY"
 
+    # SELL when price loses trend
     if today["Close"] < today["MA50"]:
         return "SELL"
 
     return None
+
 
 
 # ----------------------------
@@ -146,3 +152,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
+
