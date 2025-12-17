@@ -115,7 +115,7 @@ def run_bot():
         print("\n".join(logs))
         return
 
-    allocation = portfolio_value * 0.10  # 10% notional per BUY trade
+    allocation = round(portfolio_value * 0.10, 2)  # 10% notional per BUY trade
 
     for ticker in STOCKS:
         try:
@@ -208,3 +208,4 @@ def run_bot():
 # ENTRYPOINT
 if __name__ == "__main__":
     run_bot()
+
